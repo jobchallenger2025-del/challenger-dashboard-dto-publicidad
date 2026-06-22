@@ -3618,4 +3618,20 @@ function animateNumber(element, start, end, duration) {
     requestAnimationFrame(update);
 }
 
+// ── FORMATEAR FLUJO (ELIMINAR TODAS LAS TAREAS) ──
+window.formatFlow = async function() {
+    const password = prompt("Para formatear el flujo, por favor ingresa la contraseña de administrador:");
+    if (password === "9090danielchallenger") {
+        const confirmDelete = confirm("¿Estás seguro de que deseas eliminar todas las actividades y formatear el flujo? Esta acción dejará el tablero en cero y no se puede deshacer.");
+        if (confirmDelete) {
+            tasks = [];
+            await saveTasksToServer(); // Guarda las tareas vacías
+            renderAll();
+            alert("Flujo formateado correctamente. Todas las actividades han sido eliminadas.");
+        }
+    } else if (password !== null) {
+        alert("Contraseña incorrecta. Acción cancelada.");
+    }
+};
+
 
