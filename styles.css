@@ -1145,7 +1145,7 @@ body.sidebar-open #viewGantt {
     outline: none;
     box-shadow: none;
     /* Compensa todo el padding de .main-content para eliminar el marco claro */
-    margin: -24px -32px -24px -80px;
+    margin: -24px -32px -50px -80px;
     width: calc(100% + 112px);
     min-height: 100vh;
     height: 100vh;
