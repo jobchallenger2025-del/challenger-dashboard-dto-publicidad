@@ -1299,7 +1299,28 @@
         </div>
     </div>
 
-    <script src="app.js?v=4"></script>
+    <!-- Firebase SDK (compat v10) -->
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+    <script>
+        // Inicialización de Firebase
+        const firebaseConfig = {
+            apiKey: "AIzaSyC8iFWixnw-8xKPNSZOVGdtACA17kUoJyc",
+            authDomain: "challenger-publicidad.firebaseapp.com",
+            projectId: "challenger-publicidad",
+            storageBucket: "challenger-publicidad.appspot.com",
+            messagingSenderId: "437689830781",
+            appId: "1:437689830781:web:0db2971d8c40f370f99014",
+            measurementId: "G-8L3ZTYRKWH"
+        };
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
+        // Habilitar persistencia offline para que funcione sin conexión
+        db.enablePersistence({ synchronizeTabs: true }).catch((err) => {
+            console.warn('⚠️ Firestore persistencia offline no disponible:', err.code);
+        });
+    </script>
+    <script src="app.js?v=5"></script>
 </body>
 
 </html>

@@ -1,76 +1,140 @@
 let tasks = [];
-let hasUnsavedChanges = false;
 let currentGanttMonth = new Date(); currentGanttMonth.setDate(1); currentGanttMonth.setHours(0, 0, 0, 0);
 let currentCalendarDate = new Date(); currentCalendarDate.setDate(1); currentCalendarDate.setHours(0,0,0,0);
 let ganttViewMode = 'monthly';
 let loadedTaskImageBase64 = null;
+let cachedAvatars = {}; // Cache local de avatares sincronizado con Firestore
+let _firstTaskLoad = true; // Para detectar la primera carga
 
-document.addEventListener('DOMContentLoaded', async () => {
+// ==================== REFERENCIAS FIRESTORE ====================
+const tasksCollection = db.collection('tasks');
+const avatarsDoc = db.collection('avatars').doc('custom');
+
+document.addEventListener('DOMContentLoaded', () => {
     setupNavTabs(); setupModal(); setupFilters(); setupGanttNav();
     setupCompletedToggle(); setupImageUpload(); setupLightbox(); setupActivityPreviewModal(); setupTakeTaskModal();
     setupDataButtons(); setupNavDateTime(); setupMetricsNav();
-    
-    tasks = await fetchTasksFromServer();
-    console.log('Tasks loaded after fetch:', tasks);
-    renderAll();
-    // Asegurar que los gráficos de métricas se rendericen explícitamente después de cargar datos
-    if (document.getElementById('tdClock')) {
-        renderMetrics();
-    }
-    showStorageStatus();
 
-    // Autosave cada 5 segundos
-    setInterval(async () => {
-        if (hasUnsavedChanges) {
-            await saveTasksToServer();
-        }
-    }, 5000);
+    // 🔴 SUSCRIPCIÓN EN TIEMPO REAL — Tareas
+    subscribeToTasks();
+    // 🔴 SUSCRIPCIÓN EN TIEMPO REAL — Avatares
+    subscribeToAvatars();
+
+    showStorageStatus();
 });
 
-// ==================== PERSISTENCIA ROBUSTA ====================
-async function fetchTasksFromServer() {
+// ==================== FIRESTORE: TIEMPO REAL ====================
+function subscribeToTasks() {
+    tasksCollection.orderBy('updatedAt', 'desc').onSnapshot((snapshot) => {
+        tasks = snapshot.docs.map(doc => ({ ...doc.data(), _firestoreId: doc.id }));
+        console.log(`🔥 Firestore onSnapshot: ${tasks.length} tareas recibidas`);
+
+        // Si la colección está vacía en la primera carga, sembrar datos de prueba
+        if (tasks.length === 0 && _firstTaskLoad) {
+            _firstTaskLoad = false;
+            console.warn('Colección vacía, sembrando datos de prueba...');
+            seedMockTasks();
+            return;
+        }
+        _firstTaskLoad = false;
+
+        renderAll();
+        // Asegurar que los gráficos de métricas se rendericen
+        if (document.getElementById('tdClock')) {
+            renderMetrics();
+        }
+        showSavedIndicator();
+    }, (error) => {
+        console.error('❌ Error en onSnapshot de tareas:', error);
+        showToast('Error de conexión con Firestore', 'error');
+    });
+}
+
+function subscribeToAvatars() {
+    avatarsDoc.onSnapshot((doc) => {
+        if (doc.exists) {
+            cachedAvatars = doc.data() || {};
+            console.log('🔥 Avatares sincronizados:', Object.keys(cachedAvatars).length);
+            renderAll(); // Re-render para mostrar avatares actualizados
+        } else {
+            cachedAvatars = {};
+        }
+    }, (error) => {
+        console.error('❌ Error en onSnapshot de avatares:', error);
+    });
+}
+
+// ==================== FIRESTORE: ESCRITURA ====================
+async function saveTaskToFirestore(taskData) {
     try {
-        const response = await fetch('http://localhost:3000/api/trafico');
-        if (!response.ok) throw new Error('Error en respuesta del servidor');
-        const data = await response.json();
-        console.log('Tasks fetched from server:', data);
-        
-        // Validar que los datos no estén vacíos
-        if (!Array.isArray(data) || data.length === 0) {
-            console.warn('Datos del servidor vacíos, usando datos de prueba');
-            const mockData = getMockTasks();
-            console.log('Mock data loaded:', mockData);
-            return mockData;
-        }
-        
-        return data;
-    } catch (err) {
-        console.error('Error cargando desde MongoDB, intentando cargar de localStorage:', err);
-        // Fallback a localStorage si el servidor falla
-        const raw = localStorage.getItem('planner_tasks');
-        if (raw) {
-            const parsed = JSON.parse(raw);
-            console.log('Tasks fetched from localStorage:', parsed);
-            
-            // Validar que los datos de localStorage no estén vacíos
-            if (!Array.isArray(parsed) || parsed.length === 0) {
-                console.warn('Datos de localStorage vacíos, usando datos de prueba');
-                const mockData = getMockTasks();
-                console.log('Mock data loaded:', mockData);
-                return mockData;
-            }
-            
-            return parsed;
-        }
-        // Fallback a datos de prueba si localStorage también falla
-        console.warn('Usando datos de prueba (mock data) ya que no hay datos disponibles');
-        const mockData = getMockTasks();
-        console.log('Mock data loaded:', mockData);
-        return mockData;
+        const docId = String(taskData.id);
+        // Eliminar el campo _firestoreId antes de guardar (es metadata local)
+        const { _firestoreId, ...cleanData } = taskData;
+        await tasksCollection.doc(docId).set(cleanData);
+        console.log('✅ Tarea guardada en Firestore:', docId);
+    } catch (error) {
+        console.error('❌ Error guardando tarea en Firestore:', error);
+        showToast('Error al guardar en la nube', 'error');
     }
 }
 
-// Datos de prueba para cuando el servidor no responde
+async function deleteTaskFromFirestore(taskId) {
+    try {
+        const docId = String(taskId);
+        await tasksCollection.doc(docId).delete();
+        console.log('🗑️ Tarea eliminada de Firestore:', docId);
+    } catch (error) {
+        console.error('❌ Error eliminando tarea de Firestore:', error);
+        showToast('Error al eliminar de la nube', 'error');
+    }
+}
+
+async function batchImportTasks(tasksArray) {
+    try {
+        const batch = db.batch();
+        tasksArray.forEach(task => {
+            const docId = String(task.id);
+            const { _firestoreId, ...cleanData } = task;
+            batch.set(tasksCollection.doc(docId), cleanData);
+        });
+        await batch.commit();
+        console.log(`✅ ${tasksArray.length} tareas importadas en batch a Firestore`);
+    } catch (error) {
+        console.error('❌ Error en batch import:', error);
+        showToast('Error al importar a Firestore', 'error');
+    }
+}
+
+async function saveAvatarToFirestore(name, base64) {
+    try {
+        await avatarsDoc.set({ [name]: base64 }, { merge: true });
+        console.log('✅ Avatar guardado en Firestore:', name);
+    } catch (error) {
+        console.error('❌ Error guardando avatar en Firestore:', error);
+        showToast('Error al guardar avatar', 'error');
+    }
+}
+
+async function deleteAllTasksFromFirestore() {
+    try {
+        const snapshot = await tasksCollection.get();
+        const batch = db.batch();
+        snapshot.docs.forEach(doc => batch.delete(doc.ref));
+        await batch.commit();
+        console.log('🗑️ Todas las tareas eliminadas de Firestore');
+    } catch (error) {
+        console.error('❌ Error formateando flujo:', error);
+        showToast('Error al formatear', 'error');
+    }
+}
+
+// ==================== SEED: DATOS DE PRUEBA ====================
+async function seedMockTasks() {
+    const mockTasks = getMockTasks();
+    await batchImportTasks(mockTasks);
+    showToast('Datos de ejemplo cargados', 'info');
+}
+
 function getMockTasks() {
     return [
         {
@@ -85,7 +149,8 @@ function getMockTasks() {
             pauses: [
                 { id: 1, reason: 'Revisión con cliente', observation: 'Cliente solicitó cambios', startDate: '2024-06-19', endDate: '2024-06-19' },
                 { id: 2, reason: 'Esperando recursos', observation: 'Falta material gráfico', startDate: '2024-06-19', endDate: '2024-06-19' }
-            ]
+            ],
+            updatedAt: new Date().toISOString()
         },
         {
             id: 2,
@@ -96,7 +161,8 @@ function getMockTasks() {
             start: '2024-06-19T09:00:00.000Z',
             end: '2024-06-21T18:00:00.000Z',
             responsible: 'María García',
-            pauses: []
+            pauses: [],
+            updatedAt: new Date().toISOString()
         },
         {
             id: 3,
@@ -107,7 +173,8 @@ function getMockTasks() {
             start: '2024-06-18T08:00:00.000Z',
             end: '2024-06-19T18:00:00.000Z',
             responsible: 'Pedro López',
-            pauses: []
+            pauses: [],
+            updatedAt: new Date().toISOString()
         },
         {
             id: 4,
@@ -120,7 +187,8 @@ function getMockTasks() {
             responsible: 'Ana Martínez',
             pauses: [
                 { id: 3, reason: 'Error en servidor', observation: 'Servidor caído', startDate: '2024-06-19', endDate: '2024-06-19' }
-            ]
+            ],
+            updatedAt: new Date().toISOString()
         },
         {
             id: 5,
@@ -131,42 +199,20 @@ function getMockTasks() {
             start: '2024-06-19T11:00:00.000Z',
             end: '2024-06-22T18:00:00.000Z',
             responsible: 'Carlos Rodríguez',
-            pauses: []
+            pauses: [],
+            updatedAt: new Date().toISOString()
         }
     ];
 }
 
-async function saveTasksToServer() {
-    try {
-        const response = await fetch('http://localhost:3000/api/trafico', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(tasks)
-        });
-        if (response.ok) {
-            hasUnsavedChanges = false;
-            showSavedIndicator();
-        } else {
-            console.error('Error en el servidor al guardar.');
-        }
-    } catch (err) {
-        console.error('Error en el fetch de guardado:', err);
-    }
-}
-
 function showStorageStatus() {
-    try {
-        const raw = localStorage.getItem('planner_tasks') || '';
-        const sizeKB = Math.round((raw.length * 2) / 1024);
-        const maxKB = 5120;
-        const pct = Math.round((sizeKB / maxKB) * 100);
-        const el = document.getElementById('storageSizeLabel');
-        if (el) {
-            el.textContent = `💾 ${sizeKB} KB / 5 MB`;
-            el.title = `Uso de almacenamiento: ${pct}%`;
-            el.style.color = pct > 80 ? '#ef4444' : pct > 60 ? '#f59e0b' : '#10b981';
-        }
-    } catch(e) {}
+    const el = document.getElementById('storageSizeLabel');
+    if (el) {
+        el.textContent = '🔥 Firestore';
+        el.title = 'Conectado a Firebase Firestore en tiempo real';
+        el.style.color = '#10b981';
+        el.style.display = 'inline';
+    }
 }
 
 function setupNavTabs() {
@@ -875,9 +921,11 @@ function handleSaveTask(e) {
         pauses: pauses,
         updatedAt: new Date().toISOString(),
     };
-    if (id) { const i = tasks.findIndex(t => t.id === parseInt(id)); if (i !== -1) tasks[i] = data; showToast('Tarea actualizada', 'success'); }
-    else { tasks.push(data); showToast('Tarea creada', 'success'); }
-    saveTasks(); closeModal(); renderAll();
+    // Guardar directamente en Firestore (onSnapshot actualizará la UI)
+    saveTaskToFirestore(data);
+    if (id) { showToast('Tarea actualizada', 'success'); }
+    else { showToast('Tarea creada', 'success'); }
+    closeModal();
 }
 
 function setupFilters() {
@@ -908,21 +956,12 @@ function setupCompletedToggle() {
     });
 }
 
-function saveTasks() {
-    hasUnsavedChanges = true; // Activa la bandera para el autosave
-    showStorageStatus();
-    // Guardamos una copia local por si falla el backend
-    try {
-        const payload = JSON.stringify(tasks);
-        localStorage.setItem('planner_tasks', payload);
-    } catch (err) {
-        if (err.name === 'QuotaExceededError' || err.code === 22) {
-            try {
-                const stripped = tasks.map(t => ({ ...t, image: null }));
-                localStorage.setItem('planner_tasks', JSON.stringify(stripped));
-            } catch(e2) { console.error('LocalStorage lleno incluso sin imagenes.'); }
-        }
+function saveTasks(updatedTask = null) {
+    // Si se pasa una tarea específica, guardar solo esa en Firestore
+    if (updatedTask) {
+        saveTaskToFirestore(updatedTask);
     }
+    // onSnapshot se encargará de actualizar la UI automáticamente
 }
 
 function showSavedIndicator() {
@@ -957,16 +996,16 @@ function importJSON() {
         const file = input.files[0];
         if (!file) return;
         const reader = new FileReader();
-        reader.onload = () => {
+        reader.onload = async () => {
             try {
                 const data = JSON.parse(reader.result);
                 const imported = Array.isArray(data) ? data : (data.tasks || []);
                 if (!imported.length) { showToast('El archivo no contiene tareas válidas', 'error'); return; }
-                if (!confirm(`¿Importar ${imported.length} tareas? Esto REEMPLAZARÁ los datos actuales (${tasks.length} tareas).`)) return;
-                tasks = imported;
-                saveTasks();
-                renderAll();
-                showToast(`✅ ${imported.length} tareas importadas correctamente`, 'success');
+                if (!confirm(`¿Importar ${imported.length} tareas? Esto AGREGARÁ las tareas a Firestore.`)) return;
+                // Asegurar que cada tarea tenga updatedAt
+                imported.forEach(t => { if (!t.updatedAt) t.updatedAt = new Date().toISOString(); });
+                await batchImportTasks(imported);
+                showToast(`✅ ${imported.length} tareas importadas a Firestore`, 'success');
             } catch(err) {
                 showToast('Error al leer el archivo: ' + err.message, 'error');
             }
@@ -994,6 +1033,7 @@ function getBusinessDays(startD, endD) {
 }
 function checkBottlenecks() {
     let changed = false;
+    const changedTasks = [];
     tasks.forEach(t => {
         if (t.status !== 'completado' && t.status !== 'en-critico' && t.status !== 'disponible' && t.start && t.end) {
             const start = new Date(t.start + 'T00:00:00');
@@ -1004,15 +1044,23 @@ function checkBottlenecks() {
                 const passedBD = getBusinessDays(start, now);
                 if ((passedBD / totalBD) * 100 > 80) {
                     t.status = 'en-critico'; t.priority = 'alta'; changed = true;
+                    changedTasks.push(t);
                     showToast(`⚠️ Alerta: "${t.name}" superó el 80% del tiempo. (${t.responsible || 'Aviso al responsable'})`, 'error');
                 }
             } else if (now > end && t.status !== 'en-critico') {
                 t.status = 'en-critico'; t.priority = 'alta'; changed = true;
+                changedTasks.push(t);
                 showToast(`⚠️ Alerta: "${t.name}" está vencida. (${t.responsible || 'Aviso al responsable'})`, 'error');
             }
         }
     });
-    if (changed) saveTasks();
+    if (changed && changedTasks.length > 0) {
+        // Guardar cada tarea modificada en Firestore
+        changedTasks.forEach(t => {
+            const { _firestoreId, ...cleanData } = t;
+            saveTaskToFirestore(cleanData);
+        });
+    }
     return changed;
 }
 
@@ -1399,13 +1447,14 @@ function closeTakeTaskModal() {
 
 function confirmTakeTask(name) {
     if (!name || name.trim() === '') return;
-    const i = tasks.findIndex(t => t.id === activeTakeTaskId);
-    if (i !== -1) {
-        tasks[i].responsible = name.trim();
-        tasks[i].status = 'en-proceso';
-        tasks[i].updatedAt = new Date().toISOString();
-        saveTasks();
-        renderAll();
+    const task = tasks.find(t => t.id === activeTakeTaskId);
+    if (task) {
+        const updatedTask = { ...task };
+        delete updatedTask._firestoreId;
+        updatedTask.responsible = name.trim();
+        updatedTask.status = 'en-proceso';
+        updatedTask.updatedAt = new Date().toISOString();
+        saveTaskToFirestore(updatedTask);
         showToast('¡Tarea asignada con éxito!', 'success');
         closeTakeTaskModal();
         document.querySelector('.nav-tab[data-view="dashboard"]').click();
@@ -1447,10 +1496,8 @@ function confirmDeleteWithPassword() {
     const pw = input.value;
 
     if (pw === '9090danielchallenger') {
-        // Contraseña correcta — eliminar tarea
-        tasks = tasks.filter(t => t.id !== pendingDeleteTaskId);
-        saveTasks();
-        renderAll();
+        // Contraseña correcta — eliminar tarea de Firestore
+        deleteTaskFromFirestore(pendingDeleteTaskId);
         closeDeletePasswordModal();
         showToast('Tarea eliminada por administrador', 'info');
     } else {
@@ -1947,7 +1994,7 @@ function stringToColor(s) { if (!s) return '#9ca3af'; let h=0; for(let i=0;i<s.l
 
 function getAvatarHtml(name, extraStyles = '') {
     if (!name) return '<span class="avatar-empty">—</span>';
-    const customAvatars = JSON.parse(localStorage.getItem('planner_avatars')) || {};
+    const customAvatars = cachedAvatars;
     const initials = getInitials(name);
     const color = stringToColor(name);
     const n = name.trim().toLowerCase();
@@ -2026,7 +2073,7 @@ function setupImageUpload() {
 function handleImageFile(file) {
     const reader = new FileReader();
     reader.onload = (e) => {
-        // Comprimir imagen antes de guardar para no saturar el localStorage
+        // Comprimir imagen antes de guardar
         compressImage(e.target.result, 400, 0.60, (compressed) => {
             loadedTaskImageBase64 = compressed;
             const previewImg = document.getElementById('taskImagePreview');
@@ -2548,7 +2595,7 @@ function renderTdTeam() {
 }
 
 function buildTdAvatar(name) {
-    const customAvatars = JSON.parse(localStorage.getItem('planner_avatars')) || {};
+    const customAvatars = cachedAvatars;
     const n = name.trim().toLowerCase();
     let imgSrc = customAvatars[name] || null;
     
@@ -3227,18 +3274,15 @@ function saveProfile() {
     console.log('currentProfileBase64:', currentProfileBase64);
     
     if (currentProfileName) {
-        const avatars = JSON.parse(localStorage.getItem('planner_avatars')) || {};
-        
         if (currentProfileBase64) {
-            avatars[currentProfileName] = currentProfileBase64;
-            localStorage.setItem('planner_avatars', JSON.stringify(avatars));
+            saveAvatarToFirestore(currentProfileName, currentProfileBase64);
             showToast('Perfil actualizado con éxito', 'success');
         } else {
             showToast('No se cargó ninguna imagen', 'info');
         }
         
         closeProfileModal();
-        renderAll(); // Re-render to show updated avatars everywhere
+        // onSnapshot de avatares se encargará de re-render
     } else {
         showToast('Error: no hay nombre de perfil', 'error');
         closeProfileModal();
@@ -3624,9 +3668,7 @@ window.formatFlow = async function() {
     if (password === "9090danielchallenger") {
         const confirmDelete = confirm("¿Estás seguro de que deseas eliminar todas las actividades y formatear el flujo? Esta acción dejará el tablero en cero y no se puede deshacer.");
         if (confirmDelete) {
-            tasks = [];
-            await saveTasksToServer(); // Guarda las tareas vacías
-            renderAll();
+            await deleteAllTasksFromFirestore();
             alert("Flujo formateado correctamente. Todas las actividades han sido eliminadas.");
         }
     } else if (password !== null) {
