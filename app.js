@@ -28,12 +28,21 @@ function subscribeToTasks() {
     tasksCollection.orderBy('updatedAt', 'desc').onSnapshot((snapshot) => {
         tasks = snapshot.docs.map(doc => ({ ...doc.data(), _firestoreId: doc.id }));
         console.log(`🔥 Firestore onSnapshot: ${tasks.length} tareas recibidas`);
+        
+        // Log detallado de cada tarea recibida
+        tasks.forEach(t => {
+            console.log(`📥 Tarea recibida: "${t.name}"`, {
+                status: t.status,
+                statusManualOverride: t.statusManualOverride,
+                updatedAt: t.updatedAt
+            });
+        });
 
-        // Si la colección está vacía en la primera carga, sembrar datos de prueba
+        // Si la colección está vacía en la primera carga, NO sembrar datos de prueba para evitar pérdida de datos
         if (tasks.length === 0 && _firstTaskLoad) {
             _firstTaskLoad = false;
-            console.warn('Colección vacía, sembrando datos de prueba...');
-            seedMockTasks();
+            console.warn('Colección vacía, NO sembrando datos de prueba para evitar pérdida de datos.');
+            // seedMockTasks(); // Comentado para evitar la pérdida de datos
             return;
         }
         _firstTaskLoad = false;
@@ -64,17 +73,56 @@ function subscribeToAvatars() {
     });
 }
 
+// Estados que nunca deben ser sobrescritos por alertas automáticas de cuello de botella
+const AUTO_CRITICAL_EXEMPT_STATUSES = new Set([
+    'disponible',
+    'completado',
+    'ajuste-cambios-revision',
+    'en-critico',
+]);
+
+function isManualStatusProtected(task) {
+    if (task?.statusManualOverride) return true;
+    return AUTO_CRITICAL_EXEMPT_STATUSES.has(task?.status);
+}
+
 // ==================== FIRESTORE: ESCRITURA ====================
-async function saveTaskToFirestore(taskData) {
+async function saveTaskToFirestore(taskData, options = {}) {
     try {
         const docId = String(taskData.id);
         // Eliminar el campo _firestoreId antes de guardar (es metadata local)
         const { _firestoreId, ...cleanData } = taskData;
-        await tasksCollection.doc(docId).set(cleanData);
+        const ref = tasksCollection.doc(docId);
+
+        console.log(`💾 Guardando en Firestore:`, {
+            id: docId,
+            status: cleanData.status,
+            statusManualOverride: cleanData.statusManualOverride,
+            updatedAt: cleanData.updatedAt
+        });
+
+        if (options.onlyIfNewer && cleanData.updatedAt) {
+            const doc = await ref.get();
+            if (doc.exists) {
+                const existingUpdatedAt = doc.data()?.updatedAt;
+                if (existingUpdatedAt && existingUpdatedAt > cleanData.updatedAt) {
+                    console.log('⏭️ Escritura omitida (datos más recientes en Firestore):', docId);
+                    return false;
+                }
+            }
+        }
+
+        if (options.merge) {
+            await ref.set(cleanData, { merge: true });
+        } else {
+            await ref.set(cleanData);
+        }
         console.log('✅ Tarea guardada en Firestore:', docId);
+        return true;
     } catch (error) {
         console.error('❌ Error guardando tarea en Firestore:', error);
         showToast('Error al guardar en la nube', 'error');
+        return false;
     }
 }
 
@@ -347,28 +395,88 @@ function togglePhotoRefBox() {
     if (!cb.checked && refInput) refInput.value = '';
 }
 
+// ─── Multi-responsible helpers ───────────────────────────────────────────────
+// responsible field stores an array of up to 2 names (JSON string in hidden input)
+const MAX_RESPONSIBLES = 2;
+
+function getResponsiblesArray(t) {
+    if (!t || !t.responsible) return [];
+    if (Array.isArray(t.responsible)) return t.responsible.filter(Boolean);
+    try {
+        const parsed = JSON.parse(t.responsible);
+        if (Array.isArray(parsed)) return parsed.filter(Boolean);
+    } catch(e) {}
+    // legacy single string
+    return t.responsible.trim() ? [t.responsible.trim()] : [];
+}
+
+function responsibleDisplayHtml(t, avatarStyle) {
+    const list = getResponsiblesArray(t);
+    if (!list.length) return '<span class="avatar-empty">—</span>';
+    return list.map(name =>
+        `<span style="display:inline-flex;align-items:center;gap:4px;">
+            ${getAvatarHtml(name, avatarStyle || '')}
+            <span class="resp-name">${esc(name)}</span>
+        </span>`
+    ).join('<span style="color:var(--text-muted);margin:0 2px;">&</span>');
+}
+
+function responsibleFirstName(t) {
+    const list = getResponsiblesArray(t);
+    return list[0] || '';
+}
+
+function isResponsibleAssigned(t) {
+    return getResponsiblesArray(t).length > 0;
+}
+
+// ─── Custom multi-select UI ───────────────────────────────────────────────────
 function updateCustomSelectUI(val) {
+    // val can be a JSON array string or a single string (legacy)
     const hiddenInput = document.getElementById('taskResponsible');
     const valueContainer = document.querySelector('#responsibleSelectTrigger .custom-select-value');
     const optionsContainer = document.getElementById('responsibleSelectOptions');
     if(!hiddenInput || !valueContainer || !optionsContainer) return;
-    
-    hiddenInput.value = val;
-    
-    const options = optionsContainer.querySelectorAll('.custom-option');
-    let found = false;
-    options.forEach(o => {
-        o.classList.remove('selected');
-        if(o.getAttribute('data-value') === val) {
-            o.classList.add('selected');
-            valueContainer.innerHTML = o.innerHTML;
-            found = true;
+
+    let selectedArr = [];
+    if (val && val !== '') {
+        try {
+            const parsed = JSON.parse(val);
+            selectedArr = Array.isArray(parsed) ? parsed.filter(Boolean) : [val];
+        } catch(e) {
+            selectedArr = val.trim() ? [val.trim()] : [];
+        }
+    }
+
+    hiddenInput.value = JSON.stringify(selectedArr);
+
+    // Mark options
+    optionsContainer.querySelectorAll('.custom-option').forEach(o => {
+        const v = o.getAttribute('data-value');
+        if (v === '') {
+            o.classList.toggle('selected', selectedArr.length === 0);
+        } else {
+            o.classList.toggle('selected', selectedArr.includes(v));
         }
     });
-    if(!found) {
-        options[0].classList.add('selected');
-        valueContainer.innerHTML = options[0].innerHTML;
+
+    // Update trigger display
+    refreshResponsibleTrigger(selectedArr, valueContainer);
+}
+
+function refreshResponsibleTrigger(selectedArr, valueContainer) {
+    if (!valueContainer) valueContainer = document.querySelector('#responsibleSelectTrigger .custom-select-value');
+    if (!valueContainer) return;
+    if (!selectedArr || selectedArr.length === 0) {
+        valueContainer.innerHTML = `<span class="avatar-empty" style="margin-right:8px;">—</span> Sin Asignar...`;
+        return;
     }
+    valueContainer.innerHTML = selectedArr.map(name =>
+        `<span style="display:inline-flex;align-items:center;gap:4px;margin-right:6px;">
+            ${getAvatarHtml(name, 'width:24px;height:24px;font-size:0.65rem;')}
+            <span style="font-size:0.8rem;">${esc(name)}</span>
+        </span>`
+    ).join('<span style="color:var(--text-muted);font-size:0.7rem;">+</span>');
 }
 
 function setupCustomResponsibleSelect() {
@@ -380,15 +488,18 @@ function setupCustomResponsibleSelect() {
     const valueContainer = trigger.querySelector('.custom-select-value');
 
     const teamMembers = ['Diego Rozo', 'Maycol Vargas', 'Daniela Duarte', 'Alexander Peña', 'Daniel Angulo', 'Camilo Davila'];
-    
-    let optionsHtml = `<div class="custom-option selected" data-value="">
+
+    // Add multi-select hint label
+    let optionsHtml = `<div class="responsible-select-hint">Selecciona hasta ${MAX_RESPONSIBLES} responsables</div>`;
+    optionsHtml += `<div class="custom-option" data-value="">
         <span class="avatar-empty" style="margin-right: 8px;">—</span> Sin Asignar...
     </div>`;
-    
+
     teamMembers.forEach(member => {
         optionsHtml += `<div class="custom-option" data-value="${esc(member)}">
             ${getAvatarHtml(member, 'width: 28px; height: 28px; margin-right: 8px;')}
             <span>${esc(member)}</span>
+            <span class="resp-check-icon">✓</span>
         </div>`;
     });
     optionsContainer.innerHTML = optionsHtml;
@@ -400,17 +511,45 @@ function setupCustomResponsibleSelect() {
     optionsContainer.addEventListener('click', (e) => {
         const option = e.target.closest('.custom-option');
         if(!option) return;
-        
+
         const val = option.getAttribute('data-value');
-        const html = option.innerHTML;
-        
-        hiddenInput.value = val;
-        valueContainer.innerHTML = html;
-        
-        optionsContainer.querySelectorAll('.custom-option').forEach(o => o.classList.remove('selected'));
-        option.classList.add('selected');
-        
-        wrapper.classList.remove('open');
+        let currentArr = [];
+        try {
+            const parsed = JSON.parse(hiddenInput.value);
+            currentArr = Array.isArray(parsed) ? parsed.filter(Boolean) : [];
+        } catch(e) { currentArr = []; }
+
+        if (val === '') {
+            // Clear all
+            currentArr = [];
+        } else {
+            if (currentArr.includes(val)) {
+                // Deselect
+                currentArr = currentArr.filter(v => v !== val);
+            } else {
+                if (currentArr.length >= MAX_RESPONSIBLES) {
+                    showToast(`Máximo ${MAX_RESPONSIBLES} responsables por proyecto`, 'error');
+                    return;
+                }
+                currentArr.push(val);
+            }
+        }
+
+        hiddenInput.value = JSON.stringify(currentArr);
+        refreshResponsibleTrigger(currentArr, valueContainer);
+
+        // Update selected classes
+        optionsContainer.querySelectorAll('.custom-option').forEach(o => {
+            const v = o.getAttribute('data-value');
+            if (v === '') {
+                o.classList.toggle('selected', currentArr.length === 0);
+            } else {
+                o.classList.toggle('selected', currentArr.includes(v));
+            }
+        });
+
+        // Keep dropdown open for multi-select; close only on 'Sin Asignar'
+        if (val === '') wrapper.classList.remove('open');
     });
 
     document.addEventListener('click', (e) => {
@@ -452,7 +591,7 @@ function generateExecutiveReport() {
         const inProgress = tasks.filter(t => t.status === 'en-proceso');
         const completed = tasks.filter(t => t.status === 'completado');
         const critical = tasks.filter(t => t.status === 'en-critico');
-        const available = tasks.filter(t => t.status !== 'completado' && (!t.responsible || t.responsible.trim() === ''));
+        const available = tasks.filter(t => t.status !== 'completado' && !isResponsibleAssigned(t));
         
         // Función para formatear fecha
         function formatDate(dateStr) {
@@ -479,15 +618,16 @@ function generateExecutiveReport() {
             ['Tareas Críticas', critical.length],
             ['Tareas Disponibles', available.length],
             [],
-            ['DETALLE DE TODAS LAS TAREAS'],
+            ['DETALLE DE TAREAS'],
             ['Nombre', 'Estado', 'Responsable', 'Cliente', 'Categoría', 'Prioridad', 'Fecha Entrega']
         ];
         
         tasks.forEach(t => {
+            const respNames = getResponsiblesArray(t).join(' & ') || 'Sin asignar';
             totalData.push([
                 t.name || 'Sin nombre',
                 t.status || 'Sin estado',
-                t.responsible || 'Sin asignar',
+                respNames,
                 t.client || 'Sin cliente',
                 t.category || 'Sin categoría',
                 t.priority || 'Sin prioridad',
@@ -557,9 +697,10 @@ function generateExecutiveReport() {
         ];
         
         inProgress.forEach(t => {
+            const respNames = getResponsiblesArray(t).join(' & ') || 'Sin asignar';
             inProgressData.push([
                 t.name || 'Sin nombre',
-                t.responsible || 'Sin asignar',
+                respNames,
                 t.client || 'Sin cliente',
                 t.category || 'Sin categoría',
                 t.priority || 'Sin prioridad',
@@ -626,9 +767,10 @@ function generateExecutiveReport() {
         ];
         
         completed.forEach(t => {
+            const respNames = getResponsiblesArray(t).join(' & ') || 'Sin asignar';
             completedData.push([
                 t.name || 'Sin nombre',
-                t.responsible || 'Sin asignar',
+                respNames,
                 t.client || 'Sin cliente',
                 t.category || 'Sin categoría',
                 t.priority || 'Sin prioridad',
@@ -695,9 +837,10 @@ function generateExecutiveReport() {
         ];
         
         critical.forEach(t => {
+            const respNames = getResponsiblesArray(t).join(' & ') || 'Sin asignar';
             criticalData.push([
                 t.name || 'Sin nombre',
-                t.responsible || 'Sin asignar',
+                respNames,
                 t.client || 'Sin cliente',
                 t.category || 'Sin categoría',
                 t.priority || 'Sin prioridad',
@@ -859,8 +1002,11 @@ function openTaskModal(editId = null) {
         if (t) {
             document.getElementById('taskId').value = t.id;
             document.getElementById('taskName').value = t.name;
-            document.getElementById('taskResponsible').value = t.responsible || '';
-            updateCustomSelectUI(t.responsible || '');
+            // Support both legacy string and new array format
+            const respArr = getResponsiblesArray(t);
+            const respVal = JSON.stringify(respArr);
+            document.getElementById('taskResponsible').value = respVal;
+            updateCustomSelectUI(respVal);
             document.getElementById('taskClient').value = t.client || '';
             document.getElementById('taskCategory').value = t.category;
             document.getElementById('taskStatus').value = t.status;
@@ -899,30 +1045,71 @@ function openTaskModal(editId = null) {
 
 function closeModal() { document.getElementById('taskModal').classList.remove('open'); }
 
-function handleSaveTask(e) {
+async function handleSaveTask(e) {
     e.preventDefault();
     const id = document.getElementById('taskId').value;
+    const parsedId = id ? parseInt(id, 10) : null;
+    const existing = parsedId ? tasks.find(x => x.id === parsedId) : null;
     const pauses = collectProjectPauses();
+    const selectedStatus = document.getElementById('taskStatus').value;
+    const updatedAt = new Date().toISOString();
     const data = {
-        id: id ? parseInt(id) : Date.now(),
+        ...(existing ? (({ _firestoreId, statusManualOverride, ...rest }) => rest)(existing) : {}),
+        id: parsedId || Date.now(),
         name: document.getElementById('taskName').value.trim(),
-        responsible: document.getElementById('taskResponsible').value,
+        responsible: (function() {
+            try {
+                const v = document.getElementById('taskResponsible').value;
+                const parsed = JSON.parse(v);
+                return Array.isArray(parsed) ? parsed.filter(Boolean) : (v ? [v] : []);
+            } catch(e) {
+                const v = document.getElementById('taskResponsible').value;
+                return v && v.trim() ? [v.trim()] : [];
+            }
+        })(),
         client: document.getElementById('taskClient').value,
         category: document.getElementById('taskCategory').value,
-        status: document.getElementById('taskStatus').value,
+        status: selectedStatus,
         priority: document.getElementById('taskPriority').value,
         start: document.getElementById('taskStart').value,
         end: document.getElementById('taskEnd').value,
         comment: document.getElementById('taskComment').value.trim(),
-        image: loadedTaskImageBase64,
+        image: loadedTaskImageBase64 ?? existing?.image ?? null,
         photoShoot: document.getElementById('taskPhotoShoot').checked,
         photoShootRef: document.getElementById('taskPhotoShootRef').value.trim(),
         baseTecnica: getBaseTecnicaValue(),
         pauses: pauses,
-        updatedAt: new Date().toISOString(),
+        statusManualOverride: true, // Siempre establecer a true al editar manualmente
+        updatedAt,
     };
-    // Guardar directamente en Firestore (onSnapshot actualizará la UI)
-    saveTaskToFirestore(data);
+
+    console.log(`💾 Guardando tarea "${data.name}":`, {
+        status: data.status,
+        statusManualOverride: data.statusManualOverride,
+        selectedStatus: selectedStatus
+    });
+
+    const saved = await saveTaskToFirestore(data);
+    if (!saved) {
+        showToast('Error al guardar en la nube', 'error');
+        return;
+    }
+
+    console.log(`✅ Tarea guardada exitosamente en Firestore`);
+
+    // Actualización local después de guardar exitosamente
+    if (existing) {
+        Object.assign(existing, data);
+        console.log(`🔄 Tarea existente actualizada localmente:`, {
+            status: existing.status,
+            statusManualOverride: existing.statusManualOverride
+        });
+    } else {
+        tasks.unshift(data);
+        console.log(`➕ Nueva tarea agregada localmente`);
+    }
+    renderAll();
+
     if (id) { showToast('Tarea actualizada', 'success'); }
     else { showToast('Tarea creada', 'success'); }
     closeModal();
@@ -938,10 +1125,16 @@ function updateResponsibleFilter() {
     const sel = document.getElementById('filterResponsible');
     if (!sel) return;
     const currVal = sel.value;
-    const responsibles = [...new Set(tasks.map(t => t.responsible).filter(r => r && r.trim() !== ''))].sort();
+    // Collect all individual names from the (possibly array-based) responsible field
+    const allNames = new Set();
+    tasks.forEach(t => {
+        const arr = getResponsiblesArray(t);
+        arr.forEach(name => { if (name && name.trim()) allNames.add(name.trim()); });
+    });
+    const responsibles = [...allNames].sort();
     
     let opts = '<option value="all">Todos los responsables</option>';
-    responsibles.forEach(r => { opts += `<option value="${r}">${esc(r)}</option>`; });
+    responsibles.forEach(r => { opts += `<option value="${esc(r)}">${esc(r)}</option>`; });
     sel.innerHTML = opts;
     
     if (responsibles.includes(currVal)) sel.value = currVal;
@@ -1035,31 +1228,46 @@ function checkBottlenecks() {
     let changed = false;
     const changedTasks = [];
     tasks.forEach(t => {
-        if (t.status !== 'completado' && t.status !== 'en-critico' && t.status !== 'disponible' && t.start && t.end) {
-            const start = new Date(t.start + 'T00:00:00');
-            const end = new Date(t.end + 'T23:59:59');
-            const now = new Date();
-            if (now > start && now <= end) {
-                const totalBD = getBusinessDays(start, end) || 1;
-                const passedBD = getBusinessDays(start, now);
-                if ((passedBD / totalBD) * 100 > 80) {
-                    t.status = 'en-critico'; t.priority = 'alta'; changed = true;
-                    changedTasks.push(t);
-                    showToast(`⚠️ Alerta: "${t.name}" superó el 80% del tiempo. (${t.responsible || 'Aviso al responsable'})`, 'error');
-                }
-            } else if (now > end && t.status !== 'en-critico') {
-                t.status = 'en-critico'; t.priority = 'alta'; changed = true;
-                changedTasks.push(t);
-                showToast(`⚠️ Alerta: "${t.name}" está vencida. (${t.responsible || 'Aviso al responsable'})`, 'error');
-            }
+        // Respetar estados fijados manualmente desde el modal (p. ej. Ajuste de cambios en revisión)
+        const isProtected = isManualStatusProtected(t);
+        console.log(`🔍 Check bottlenecks para "${t.name}": status=${t.status}, statusManualOverride=${t.statusManualOverride}, isProtected=${isProtected}`);
+        
+        if (isProtected) {
+            console.log(`✅ Tarea "${t.name}" protegida, no se modifica`);
+            return;
+        }
+        if (t.status === 'completado' || !t.start || !t.end) return;
+
+        const start = new Date(t.start + 'T00:00:00');
+        const end = new Date(t.end + 'T23:59:59');
+        const now = new Date();
+        let shouldMarkCritical = false;
+
+        if (now > start && now <= end) {
+            const totalBD = getBusinessDays(start, end) || 1;
+            const passedBD = getBusinessDays(start, now);
+            if ((passedBD / totalBD) * 100 > 80) shouldMarkCritical = true;
+        } else if (now > end) {
+            shouldMarkCritical = true;
+        }
+
+        if (shouldMarkCritical && t.status !== 'en-critico') {
+            console.log(`⚠️ Marcando "${t.name}" como crítico`);
+            t.status = 'en-critico';
+            t.priority = 'alta';
+            t.statusManualOverride = false;
+            t.updatedAt = new Date().toISOString();
+            changed = true;
+            changedTasks.push(t);
+            const respNames = getResponsiblesArray(t).join(' & ') || 'Aviso al responsable';
+            showToast(`⚠️ Alerta: "${t.name}" ${now > end ? 'está vencida' : 'superó el 80% del tiempo'}. (${respNames})`, 'error');
         }
     });
+    
+    // NO guardar automáticamente en Firestore para evitar sobrescribir cambios manuales
+    // Solo modificar localmente para la visualización
     if (changed && changedTasks.length > 0) {
-        // Guardar cada tarea modificada en Firestore
-        changedTasks.forEach(t => {
-            const { _firestoreId, ...cleanData } = t;
-            saveTaskToFirestore(cleanData);
-        });
+        console.log(`⚠️ ${changedTasks.length} tareas marcadas como críticas localmente (sin guardar en Firestore)`);
     }
     return changed;
 }
@@ -1076,7 +1284,7 @@ function renderStats() {
     const completed = tasks.filter(t => t.status === 'completado').length;
     const critical = tasks.filter(t => t.status === 'en-critico').length;
     const review = tasks.filter(t => t.status === 'ajuste-cambios-revision').length;
-    const available = tasks.filter(t => t.status !== 'completado' && (!t.responsible || t.responsible.trim() === '')).length;
+    const available = tasks.filter(t => t.status !== 'completado' && !isResponsibleAssigned(t)).length;
     const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
     
     // Actualizar directamente sin animación (igual que en Métricas Challenger)
@@ -1251,14 +1459,17 @@ function renderTable() {
     const pf = document.getElementById('filterPriority').value;
     const clf = document.getElementById('filterClient').value;
     const filtered = tasks.filter(t => {
-        if (rf !== 'all' && t.responsible !== rf) return false;
+        if (rf !== 'all') {
+            const rArr = getResponsiblesArray(t);
+            if (!rArr.includes(rf)) return false;
+        }
         if (sf !== 'all' && t.status !== sf) return false;
         if (cf !== 'all' && t.category !== cf) return false;
         if (pf !== 'all' && t.priority !== pf) return false;
         if (clf !== 'all' && t.client !== clf) return false;
         return true;
     });
-    const withResponsible = filtered.filter(t => t.responsible && t.responsible.trim() !== '');
+    const withResponsible = filtered.filter(t => isResponsibleAssigned(t));
     const pending = withResponsible.filter(t => t.status !== 'completado');
     const completed = withResponsible.filter(t => t.status === 'completado');
     const tbody = document.getElementById('taskTableBody');
@@ -1302,8 +1513,10 @@ function getProgressInfo(t) {
 }
 
 function buildRow(t) {
-    const initials = getInitials(t.responsible);
-    const color = stringToColor(t.responsible || '');
+    const respList = getResponsiblesArray(t);
+    const firstName = respList[0] || '';
+    const initials = getInitials(firstName);
+    const color = stringToColor(firstName);
     const timeline = t.start && t.end ? formatShortDate(t.start) + ' - ' + formatShortDate(t.end) : '—';
     const tlColor = getTimelineColor(t.status);
     const updated = t.updatedAt ? timeAgo(t.updatedAt) : '—';
@@ -1323,11 +1536,20 @@ function buildRow(t) {
         ? `<span class="pauses-badge" title="${t.pauses.map(p => `${p.reason || 'Sin motivo'}: ${p.observation || 'Sin observación'}`).join('\n')}">⏸️ ${pausesCount}</span>` 
         : '<span style="color: var(--text-muted);">—</span>';
 
+    // Build responsible cell for up to 2 members
+    const respCellHtml = respList.length === 0
+        ? '<span class="avatar-empty">—</span>'
+        : respList.map(name =>
+            `<span style="display:inline-flex;align-items:center;gap:4px;">
+                ${getAvatarHtml(name)}<span class="resp-name">${esc(name)}</span>
+            </span>`
+          ).join('<span style="color:var(--text-muted);font-size:0.7rem;margin:0 2px;">&</span>');
+
     return `<tr class="${t.status === 'completado' ? 'row-completed' : ''} ${t.status === 'en-critico' ? 'row-critical' : ''}">
         <td><input type="checkbox" class="task-check" data-id="${t.id}"></td>
         <td class="td-task-name">${esc(t.name)}</td>
         <td>${previewCell}</td>
-        <td><div class="responsible-cell">${t.responsible ? `${getAvatarHtml(t.responsible)}<span class="resp-name">${esc(t.responsible)}</span>` : '<span class="avatar-empty">—</span>'}</div></td>
+        <td><div class="responsible-cell">${respCellHtml}</div></td>
         <td><span class="status-badge" data-status="${t.status}">${statusLabels[t.status]}</span></td>
         <td class="td-date">${formatDate(t.end)}</td>
         <td class="td-time-left">
@@ -1364,7 +1586,8 @@ function renderMarketplace() {
     const marketScroll = document.getElementById('marketScroll');
     if (!marketTableBody) return;
     
-    const marketTasks = tasks.filter(t => t.status !== 'completado');
+    // Solo mostrar tareas sin asignar (las que tienen el botón "TOMAR TAREA")
+    const marketTasks = tasks.filter(t => t.status !== 'completado' && !isResponsibleAssigned(t));
     
     if (marketTasks.length === 0) {
         marketTableBody.innerHTML = '';
@@ -1383,14 +1606,15 @@ function renderMarketplace() {
         
         let previewCell = t.image ? `<img src="${t.image}" class="table-preview-thumbnail" onclick="event.stopPropagation(); openLightbox('${esc(t.image)}', '${esc(t.name)}')" title="Ver imagen">` : `<div class="table-preview-placeholder"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg></div>`;
         
-        let actionCell = (!t.responsible || t.responsible.trim() === '') 
+        const mktRespList = getResponsiblesArray(t);
+        let actionCell = (!isResponsibleAssigned(t)) 
             ? `<div style="display:flex; align-items:center; gap:8px;">
                  <button class="btn-primary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px;" onclick="takeTask(${t.id})">🙋 Tomar Tarea</button>
                  <button class="btn-icon-sm" onclick="openTaskModal(${t.id})" title="Editar"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
                  <button class="btn-icon-sm" onclick="deleteTask(${t.id})" title="Eliminar"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
                </div>`
             : `<div style="display:flex; align-items:center; gap:8px;">
-                 <span style="font-weight:600; color:var(--accent); font-size:0.75rem; background:var(--bg-secondary); padding:4px 8px; border-radius:12px;">👤 ${esc(t.responsible)}</span>
+                 ${mktRespList.map(name => `<span style="font-weight:600; color:var(--accent); font-size:0.75rem; background:var(--bg-secondary); padding:4px 8px; border-radius:12px;">👤 ${esc(name)}</span>`).join('')}
                  <button class="btn-icon-sm" onclick="openTaskModal(${t.id})" title="Editar"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
                  <button class="btn-icon-sm" onclick="deleteTask(${t.id})" title="Eliminar"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
                </div>`;
@@ -1451,7 +1675,7 @@ function confirmTakeTask(name) {
     if (task) {
         const updatedTask = { ...task };
         delete updatedTask._firestoreId;
-        updatedTask.responsible = name.trim();
+        updatedTask.responsible = [name.trim()];
         updatedTask.status = 'en-proceso';
         updatedTask.updatedAt = new Date().toISOString();
         saveTaskToFirestore(updatedTask);
@@ -1568,6 +1792,26 @@ function setupGanttNav() {
         });
     }
 
+    // Event listener para el filtro por responsable
+    const ganttFilter = document.getElementById('ganttResponsibleFilter');
+    const clearGanttFilter = document.getElementById('clearGanttFilter');
+    
+    if (ganttFilter) {
+        ganttFilter.addEventListener('input', () => {
+            const filterValue = ganttFilter.value.trim();
+            clearGanttFilter.style.display = filterValue ? 'flex' : 'none';
+            renderGantt();
+        });
+    }
+    
+    if (clearGanttFilter) {
+        clearGanttFilter.addEventListener('click', () => {
+            ganttFilter.value = '';
+            clearGanttFilter.style.display = 'none';
+            renderGantt();
+        });
+    }
+
     document.getElementById('calendarPrev').addEventListener('click', () => { changeCalendarMonth(-1); });
     document.getElementById('calendarNext').addEventListener('click', () => { changeCalendarMonth(1); });
     document.getElementById('calendarToday').addEventListener('click', () => {
@@ -1618,16 +1862,28 @@ function renderGantt() {
         if (yearLabel) yearLabel.textContent = `${year}`;
     }
 
+    // Obtener el valor del filtro por responsable
+    const ganttFilterInput = document.getElementById('ganttResponsibleFilter');
+    const filterValue = ganttFilterInput ? ganttFilterInput.value.trim().toLowerCase() : '';
+
     const wt = tasks.filter(t => {
         const fb = (Number(t.id) > 1600000000000) ? new Date(Number(t.id)) : new Date();
         const startStr = t.start || fb.toISOString().split('T')[0];
         const endStr = t.end || startStr;
         const s = new Date(startStr + 'T00:00:00');
         const e = new Date(endStr + 'T23:59:59');
+        
+        // Filtro por responsable
+        let matchesResponsible = true;
+        if (filterValue) {
+            const respList = getResponsiblesArray(t);
+            matchesResponsible = respList.some(name => name.toLowerCase().includes(filterValue));
+        }
+        
         if (ganttViewMode === 'monthly') {
-            return s <= monthEnd && e >= monthStart && t.responsible && t.responsible.trim() !== '';
+            return s <= monthEnd && e >= monthStart && isResponsibleAssigned(t) && matchesResponsible;
         } else {
-            return s <= yearEnd && e >= yearStart && t.responsible && t.responsible.trim() !== '';
+            return s <= yearEnd && e >= yearStart && isResponsibleAssigned(t) && matchesResponsible;
         }
     });
 
@@ -1663,8 +1919,13 @@ function renderGantt() {
         </div>`;
 
     wt.forEach(t => {
-        h += `<div class="gantt-label-row" title="Responsable: ${esc(t.responsible || 'Sin asignar')}">
-            ${getAvatarHtml(t.responsible, 'width: 36px; height: 36px; font-size: 0.9rem; margin-right: 6px;')}
+        const ganttRespList = getResponsiblesArray(t);
+        const ganttRespTitle = ganttRespList.length ? ganttRespList.join(' & ') : 'Sin asignar';
+        const ganttAvatars = ganttRespList.length
+            ? ganttRespList.map(name => getAvatarHtml(name, 'width: 28px; height: 28px; font-size: 0.75rem; margin-right: 2px;')).join('')
+            : getAvatarHtml('', 'width: 28px; height: 28px; margin-right: 2px;');
+        h += `<div class="gantt-label-row" title="Responsable: ${esc(ganttRespTitle)}">
+            <span style="display:inline-flex;align-items:center;margin-right:6px;">${ganttAvatars}</span>
             <span class="gantt-task-name" title="${esc(t.name)}">${esc(t.name)}</span>
         </div>`;
     });
@@ -1926,9 +2187,10 @@ function openCalendarEventModal(taskId) {
     
     document.getElementById('calEventTime').textContent = `Vence: ${formatDate(endStr)}`;
     
-    if(t.responsible) {
-        document.getElementById('calEventAvatar').innerHTML = getAvatarHtml(t.responsible);
-        document.getElementById('calEventResponsible').textContent = t.responsible;
+    const calRespList = getResponsiblesArray(t);
+    if(calRespList.length) {
+        document.getElementById('calEventAvatar').innerHTML = calRespList.map(name => getAvatarHtml(name)).join('');
+        document.getElementById('calEventResponsible').textContent = calRespList.join(' & ');
     } else {
         document.getElementById('calEventAvatar').innerHTML = '<span class="avatar-empty">—</span>';
         document.getElementById('calEventResponsible').textContent = 'Sin asignar';
@@ -2158,8 +2420,14 @@ function openActivityPreviewModal(id) {
     // Load data
     document.getElementById('prevTaskName').textContent = t.name;
     
-    const respHtml = t.responsible ? `${getAvatarHtml(t.responsible, 'display:inline-block; vertical-align:middle; width:44px; height:44px; font-size:1.1rem; margin-right:8px;')}<span style="vertical-align:middle;">${esc(t.responsible)}</span>` : '<span class="avatar-empty">—</span>';
+    const prevRespList = getResponsiblesArray(t);
+    const respHtml = prevRespList.length
+        ? prevRespList.map(name =>
+            `${getAvatarHtml(name, 'display:inline-block; vertical-align:middle; width:44px; height:44px; font-size:1.1rem; margin-right:8px;')}<span style="vertical-align:middle;">${esc(name)}</span>`
+          ).join('<span style="margin:0 6px;color:var(--text-muted);">&</span>')
+        : '<span class="avatar-empty">—</span>';
     document.getElementById('prevTaskResponsible').innerHTML = respHtml;
+
     
     const clientDisplay = clientLabels[t.client] || t.client || '—';
     document.getElementById('prevTaskClient').innerHTML = `<span class="client-badge" style="margin:0;">${esc(clientDisplay)}</span>`;
@@ -2264,9 +2532,11 @@ function getTdUserColor(name) {
 function getTdResponsibleLoads() {
     const loads = {};
     tasks.forEach(t => {
-        if (!t.responsible || !t.responsible.trim()) return;
         if (t.status === 'completado') return;
-        loads[t.responsible] = (loads[t.responsible] || 0) + 1;
+        const arr = getResponsiblesArray(t);
+        arr.forEach(name => {
+            if (name && name.trim()) loads[name] = (loads[name] || 0) + 1;
+        });
     });
     return loads;
 }
@@ -2291,7 +2561,7 @@ function seriesRecentVolatility(data) {
 const clientLabelsShort = {
     'id': 'ID', 'id-linea-blanca': 'ID · L. Blanca', 'id-gasodomesticos': 'ID · Gasodom.',
     'id-electronica': 'ID · Electrónica', 'id-rta': 'ID · RTA',
-    'mercadeo': 'Mercadeo', 'ventas': 'Ventas',
+    'mercadeo': 'Mercadeo', 'ventas': 'Ventas', 'visual': 'Dpto. Visual',
     'marketing-digital': 'Mkt Digital', 'inbound-challenger': 'Inbound',
     'puntos-propios': 'Puntos', 'fundacion-challenger': 'Fund. Challenger',
     'sst': 'S.S.T', 'lemco': 'LEMCO', 'exportaciones': 'Exportaciones',
@@ -2307,6 +2577,7 @@ const catLabelsShort = {
     'plotter-corte': '✂️ Plotter corte', 'tomo-fotografica': '📸 Tomo fotográfica',
     'reunion': '👥 Reunión', 'revision-proyectos': '📋 Revisión proyectos',
     'artwork': '🎨 ArtWork', 'ficha-tecnica': '📝 Ficha técnica', 'cajas-tv': '📺 Cajas TV',
+    'serigrafia': '🖌️ Serigrafía', 'exhibicion': '🏛️ Exhibición',
     'digital': '💻 Digital', 'piezas': '🖼 Piezas',
     'etiquetas': '🔖 Etiquetas',
     'publicidad': '📣 Publicidad', 'empaque': '📦 Empaque', 'otros': '📌 Otros', 'otro': '🗂 Otro'
@@ -2474,7 +2745,7 @@ function renderTdHeader() {
     const done = tasks.filter(t => t.status === 'completado').length;
     const critical = tasks.filter(t => t.status === 'en-critico').length;
     const review = tasks.filter(t => t.status === 'ajuste-cambios-revision').length;
-    const available = tasks.filter(t => t.status !== 'completado' && (!t.responsible || t.responsible.trim() === '')).length;
+    const available = tasks.filter(t => t.status !== 'completado' && !isResponsibleAssigned(t)).length;
     const pct = total ? Math.round((done / total) * 100) : 0;
 
     const elTotal = document.getElementById('tdTotalTasks');
@@ -2559,9 +2830,10 @@ function renderTdTeam() {
 
     const counts = {};
     tasks.forEach(t => {
-        if (t.responsible && t.responsible.trim()) {
-            counts[t.responsible] = (counts[t.responsible] || 0) + 1;
-        }
+        const arr = getResponsiblesArray(t);
+        arr.forEach(name => {
+            if (name && name.trim()) counts[name] = (counts[name] || 0) + 1;
+        });
     });
 
     const sorted = Object.entries(counts).sort((a,b) => b[1]-a[1]);
@@ -2804,6 +3076,8 @@ function renderTdPauses() {
         'producción': { label: 'Producción', color: '#ff2d55' },
         'produccion': { label: 'Producción', color: '#ff2d55' },
         'marketing': { label: 'Marketing', color: '#bf5af2' },
+        'serigrafia': { label: 'Serigrafía', color: '#ff6b6b' },
+        'exhibicion': { label: 'Exhibición', color: '#4ecdc4' },
         'otros': { label: 'Otros', color: '#4a5568' },
     };
 
