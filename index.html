@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="referrer" content="strict-origin-when-cross-origin">
-    <title>Planeador Semanal Dinámico | PM Control Center</title>
+    <title>CHALLENGER FLOW | PM Control Center</title>
     <meta name="description"
         content="Planeador Semanal Dinámico con Dashboard de Control y Vista Gantt para gestión de proyectos de desarrollo y diseño creativo.">
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -14,6 +14,7 @@
         href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap"
         rel="stylesheet">
     <link rel="stylesheet" href="styles.css?v=3">
+    <link rel="icon" type="image/svg+xml" href="team/colombia.svg">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
@@ -494,6 +495,21 @@
                         <button id="btnGanttYear" onclick="setGanttViewMode('yearly')">Anual</button>
                     </div>
                 </div>
+                <div style="display:flex; align-items:center; gap:12px;">
+                    <div class="gantt-filter-wrapper">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="gantt-filter-icon">
+                            <circle cx="11" cy="11" r="8"></circle>
+                            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                        </svg>
+                        <input type="text" id="ganttResponsibleFilter" placeholder="Filtrar por responsable..." class="gantt-filter-input">
+                        <button id="clearGanttFilter" class="btn-icon-sm" style="display:none;" title="Limpiar filtro">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="18" y1="6" x2="6" y2="18"></line>
+                                <line x1="6" y1="6" x2="18" y2="18"></line>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
                 <div class="gantt-nav" id="ganttNavControls">
                     <button class="btn-icon-sm" id="ganttPrev" title="Mes anterior">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -900,6 +916,7 @@
                             </optgroup>
                             <option value="mercadeo">Mercadeo</option>
                             <option value="ventas">Ventas</option>
+                            <option value="visual">Dpto. Visual</option>
                             <option value="marketing-digital">Marketing Digital</option>
                             <option value="inbound-challenger">Inbound Challenger</option>
                             <option value="puntos-propios">Puntos propios</option>
@@ -932,6 +949,8 @@
                             <option value="reunion">👥 Reunión</option>
                             <option value="revision-proyectos">📋 Revisión de proyectos</option>
                             <option value="artwork">🎨 ArtWork</option>
+                            <option value="serigrafia">🖌️ Serigrafía</option>
+                            <option value="exhibicion">🏛️ Exhibición</option>
                             <option value="ficha-tecnica">📝 Ficha técnica</option>
                             <option value="cajas-tv">📺 Cajas TV</option>
                             <option value="otros">📌 Otros</option>
