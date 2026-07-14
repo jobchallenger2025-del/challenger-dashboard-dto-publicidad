@@ -26,11 +26,11 @@ document.addEventListener('DOMContentLoaded', () => {
 // ==================== FIRESTORE: TIEMPO REAL ====================
 function subscribeToTasks() {
     tasksCollection.orderBy('updatedAt', 'desc').onSnapshot((snapshot) => {
-        tasks = snapshot.docs.map(doc => ({ ...doc.data(), _firestoreId: doc.id }));
-        console.log(`🔥 Firestore onSnapshot: ${tasks.length} tareas recibidas`);
+        const newTasks = snapshot.docs.map(doc => ({ ...doc.data(), _firestoreId: doc.id }));
+        console.log(`🔥 Firestore onSnapshot: ${newTasks.length} tareas recibidas`);
         
         // Log detallado de cada tarea recibida
-        tasks.forEach(t => {
+        newTasks.forEach(t => {
             console.log(`📥 Tarea recibida: "${t.name}"`, {
                 status: t.status,
                 statusManualOverride: t.statusManualOverride,
@@ -39,13 +39,31 @@ function subscribeToTasks() {
         });
 
         // Si la colección está vacía en la primera carga, NO sembrar datos de prueba para evitar pérdida de datos
-        if (tasks.length === 0 && _firstTaskLoad) {
+        if (newTasks.length === 0 && _firstTaskLoad) {
             _firstTaskLoad = false;
             console.warn('Colección vacía, NO sembrando datos de prueba para evitar pérdida de datos.');
             // seedMockTasks(); // Comentado para evitar la pérdida de datos
             return;
         }
         _firstTaskLoad = false;
+
+        // Preservar statusManualOverride local para tareas que fueron editadas recientemente
+        const localOverrides = new Map();
+        tasks.forEach(t => {
+            if (t.statusManualOverride) {
+                localOverrides.set(t.id, t.statusManualOverride);
+            }
+        });
+
+        tasks = newTasks;
+
+        // Restaurar statusManualOverride si existe en el mapa local
+        tasks.forEach(t => {
+            if (localOverrides.has(t.id)) {
+                console.log(`🔄 Restaurando statusManualOverride para "${t.name}"`);
+                t.statusManualOverride = localOverrides.get(t.id);
+            }
+        });
 
         renderAll();
         // Asegurar que los gráficos de métricas se rendericen
@@ -112,12 +130,9 @@ async function saveTaskToFirestore(taskData, options = {}) {
             }
         }
 
-        if (options.merge) {
-            await ref.set(cleanData, { merge: true });
-        } else {
-            await ref.set(cleanData);
-        }
-        console.log('✅ Tarea guardada en Firestore:', docId);
+        // SIEMPRE usar merge para asegurar que los campos se actualicen correctamente
+        await ref.set(cleanData, { merge: true });
+        console.log('✅ Tarea guardada en Firestore con merge:', docId);
         return true;
     } catch (error) {
         console.error('❌ Error guardando tarea en Firestore:', error);
