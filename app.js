@@ -1701,11 +1701,13 @@ function confirmTakeTask(name) {
 }
 
 let pendingDeleteTaskId = null;
+let pendingDeleteTaskIds = [];
 
 function deleteTask(id) {
     const t = tasks.find(x => x.id === id);
     if (!t) return;
     pendingDeleteTaskId = id;
+    pendingDeleteTaskIds = [];
 
     // Show password modal
     const modal = document.getElementById('deletePasswordModal');
@@ -1725,8 +1727,31 @@ function closeDeletePasswordModal() {
     const modal = document.getElementById('deletePasswordModal');
     modal.classList.remove('open');
     pendingDeleteTaskId = null;
+    pendingDeleteTaskIds = [];
     document.getElementById('deletePasswordInput').value = '';
     document.getElementById('deletePwError').style.display = 'none';
+}
+
+function deleteSelectedTasks(containerId) {
+    const checkboxes = document.querySelectorAll(`#${containerId} .task-check:checked`);
+    const ids = Array.from(checkboxes).map(cb => parseInt(cb.getAttribute('data-id'), 10));
+    
+    if (ids.length === 0) return;
+    
+    pendingDeleteTaskIds = ids;
+    pendingDeleteTaskId = null;
+    
+    const modal = document.getElementById('deletePasswordModal');
+    const taskNameEl = document.getElementById('deletePwTaskName');
+    const input = document.getElementById('deletePasswordInput');
+    const errorEl = document.getElementById('deletePwError');
+
+    taskNameEl.textContent = `${ids.length} tareas seleccionadas`;
+    input.value = '';
+    input.type = 'password';
+    errorEl.style.display = 'none';
+    modal.classList.add('open');
+    setTimeout(() => input.focus(), 150);
 }
 
 function confirmDeleteWithPassword() {
@@ -1735,10 +1760,16 @@ function confirmDeleteWithPassword() {
     const pw = input.value;
 
     if (pw === '9090danielchallenger') {
-        // Contraseña correcta — eliminar tarea de Firestore
-        deleteTaskFromFirestore(pendingDeleteTaskId);
+        // Contraseña correcta — eliminar tarea(s) de Firestore
+        if (pendingDeleteTaskIds && pendingDeleteTaskIds.length > 0) {
+            pendingDeleteTaskIds.forEach(id => deleteTaskFromFirestore(id));
+            pendingDeleteTaskIds = [];
+            showToast('Tareas eliminadas por administrador', 'info');
+        } else if (pendingDeleteTaskId !== null) {
+            deleteTaskFromFirestore(pendingDeleteTaskId);
+            showToast('Tarea eliminada por administrador', 'info');
+        }
         closeDeletePasswordModal();
-        showToast('Tarea eliminada por administrador', 'info');
     } else {
         // Contraseña incorrecta
         errorEl.style.display = 'flex';
@@ -1770,7 +1801,32 @@ document.addEventListener('DOMContentLoaded', () => {
             if (e.target === pwModal) closeDeletePasswordModal();
         });
     }
+
+    document.addEventListener('change', (e) => {
+        if (e.target.classList.contains('task-check')) {
+            updateBulkDeleteButtons();
+        } else if (e.target.id === 'selectAll') {
+            const isChecked = e.target.checked;
+            document.querySelectorAll('#taskTableBody .task-check').forEach(cb => cb.checked = isChecked);
+            updateBulkDeleteButtons();
+        } else if (e.target.id === 'selectAllCompleted') {
+            const isChecked = e.target.checked;
+            document.querySelectorAll('#completedTableBody .task-check').forEach(cb => cb.checked = isChecked);
+            updateBulkDeleteButtons();
+        }
+    });
 });
+
+function updateBulkDeleteButtons() {
+    const dailyChecked = document.querySelectorAll('#taskTableBody .task-check:checked').length > 0;
+    const completedChecked = document.querySelectorAll('#completedTableBody .task-check:checked').length > 0;
+    
+    const btnDaily = document.getElementById('bulkDeleteBtnDaily');
+    if (btnDaily) btnDaily.style.display = dailyChecked ? 'inline-flex' : 'none';
+    
+    const btnCompleted = document.getElementById('bulkDeleteBtnCompleted');
+    if (btnCompleted) btnCompleted.style.display = completedChecked ? 'inline-flex' : 'none';
+}
 
 // GANTT — Vista mensual
 const GANTT_DOW = ['DOM', 'L', 'M', 'MI', 'JUE', 'VIE', 'SAB'];

@@ -248,6 +248,7 @@
                 <div class="table-header" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
                     <div style="display:flex; align-items:center; gap:16px;">
                         <h2 style="margin:0;">Tráfico Diario</h2>
+                        <button class="btn-delete" id="bulkDeleteBtnDaily" style="display:none;" onclick="deleteSelectedTasks('taskTableBody')" title="Eliminar tareas seleccionadas"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg> Eliminar Seleccionadas</button>
                     </div>
                     <div class="table-filters">
                         <select id="filterResponsible" class="filter-select">
@@ -370,13 +371,14 @@
                         </span>
                         Completado
                         <span class="completed-count" id="completedCount">0</span>
+                        <button class="btn-delete" id="bulkDeleteBtnCompleted" style="display:none; margin-left: 16px; font-size: 0.8rem; padding: 4px 8px;" onclick="deleteSelectedTasks('completedTableBody')" title="Eliminar tareas seleccionadas"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg> Eliminar Seleccionadas</button>
                     </h2>
                 </div>
                 <div class="table-scroll" id="completedBody">
                     <table class="task-table">
                         <thead>
                             <tr>
-                                <th class="th-check"><input type="checkbox"></th>
+                                <th class="th-check"><input type="checkbox" id="selectAllCompleted" title="Seleccionar todo"></th>
                                 <th class="th-task">Tarea</th>
                                 <th class="th-preview">Vista</th>
                                 <th class="th-responsible">Responsable</th>
