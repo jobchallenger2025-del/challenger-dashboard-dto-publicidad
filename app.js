@@ -586,400 +586,268 @@ function openAdminTaskModal() {
 function generateExecutiveReport() {
     try {
         showToast('Generando reporte Excel...', 'info');
-        
-        // Verificar que la librería XLSX esté cargada
+
         if (typeof XLSX === 'undefined') {
             showToast('Error: La librería XLSX no está cargada', 'error');
-            console.error('XLSX no está definido');
             return;
         }
-        
+
         const now = new Date();
         const dateStr = now.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
         const filename = `Reporte_Gestion_Challenger_${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}.xlsx`;
-        
-        // Crear libro de trabajo
+
         const wb = XLSX.utils.book_new();
-        
-        // Calcular métricas
-        const total = tasks.length;
+
+        const total      = tasks.length;
         const inProgress = tasks.filter(t => t.status === 'en-proceso');
-        const completed = tasks.filter(t => t.status === 'completado');
-        const critical = tasks.filter(t => t.status === 'en-critico');
-        const available = tasks.filter(t => t.status !== 'completado' && !isResponsibleAssigned(t));
-        
-        // Función para formatear fecha
-        function formatDate(dateStr) {
-            if (!dateStr || dateStr === 'Sin fecha') return 'Sin fecha';
+        const completed  = tasks.filter(t => t.status === 'completado');
+        const critical   = tasks.filter(t => t.status === 'en-critico');
+        const available  = tasks.filter(t => t.status !== 'completado' && !isResponsibleAssigned(t));
+
+        // ── Formatear fecha desde t.start / t.end (campos reales) ──────────────
+        function fmtDate(val) {
+            if (!val) return '—';
             try {
-                const date = new Date(dateStr);
-                if (isNaN(date.getTime())) return dateStr;
-                return date.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
-            } catch (e) {
-                return dateStr;
-            }
+                const iso = String(val).includes('T') ? val : val + 'T00:00:00';
+                const d = new Date(iso);
+                if (isNaN(d.getTime())) return val;
+                return d.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
+            } catch (e) { return val; }
         }
-        
-        // PESTAÑA 1: TAREAS TOTALES
-        const totalData = [
-            ['REPORTE EJECUTIVO - SISTEMA DE GESTIÓN TI CHALLENGER'],
-            ['Fecha de generación:', dateStr],
-            [],
-            ['MÉTRICA', 'VALOR'],
-            ['Total de Tareas', total],
-            ['Porcentaje Completado', total > 0 ? Math.round((completed.length / total) * 100) + '%' : '0%'],
-            ['Tareas Completadas', completed.length],
-            ['Tareas en Proceso', inProgress.length],
-            ['Tareas Críticas', critical.length],
-            ['Tareas Disponibles', available.length],
-            [],
-            ['DETALLE DE TAREAS'],
-            ['Nombre', 'Estado', 'Responsable', 'Cliente', 'Categoría', 'Prioridad', 'Fecha Entrega']
-        ];
-        
-        tasks.forEach(t => {
-            const respNames = getResponsiblesArray(t).join(' & ') || 'Sin asignar';
-            totalData.push([
-                t.name || 'Sin nombre',
-                t.status || 'Sin estado',
-                respNames,
-                t.client || 'Sin cliente',
+
+        // ── Paleta de colores (ARGB sin #) ──────────────────────────────────────
+        const C = {
+            BLUE_DARK:   'FF1A3A6C',
+            BLUE_MID:    'FF2563EB',
+            BLUE_LIGHT:  'FFDBEAFE',
+            GREEN_DARK:  'FF065F46',
+            GREEN_LIGHT: 'FFD1FAE5',
+            RED_DARK:    'FF7F1D1D',
+            RED_LIGHT:   'FFFEE2E2',
+            ORG_DARK:    'FF7C2D12',
+            ORG_LIGHT:   'FFFFEDD5',
+            GRAY_DARK:   'FF374151',
+            GRAY_LIGHT:  'FFF9FAFB',
+            WHITE:       'FFFFFFFF',
+            METRIC_BG:   'FFF0F4FF',
+        };
+
+        const THIN = {
+            top: { style: 'thin', color: { rgb: 'FFD1D5DB' } },
+            bottom: { style: 'thin', color: { rgb: 'FFD1D5DB' } },
+            left: { style: 'thin', color: { rgb: 'FFD1D5DB' } },
+            right: { style: 'thin', color: { rgb: 'FFD1D5DB' } }
+        };
+
+        function mkStyle(bg, fg, bold, sz, center, borders) {
+            const s = {
+                font: { bold: !!bold, color: { rgb: fg || C.WHITE }, sz: sz || 10, name: 'Calibri' },
+                fill: { patternType: 'solid', fgColor: { rgb: bg || C.WHITE } },
+                alignment: { horizontal: center ? 'center' : 'left', vertical: 'center', wrapText: false }
+            };
+            if (borders) s.border = THIN;
+            return s;
+        }
+
+        function setStyle(ws, r, c, style) {
+            const addr = XLSX.utils.encode_cell({ r, c });
+            if (!ws[addr]) ws[addr] = { v: '', t: 's' };
+            ws[addr].s = style;
+        }
+
+        function styleRow(ws, r, numCols, style) {
+            for (let c = 0; c < numCols; c++) setStyle(ws, r, c, style);
+        }
+
+        // ── Función principal que construye un sheet ────────────────────────────
+        function buildSheet(title, metricBlock, headerRow, dataRows, colWidths, statusColIdx) {
+            const numCols = headerRow.length;
+
+            // Construir AOA
+            // r0: título
+            // r1: fecha
+            // r2: vacío
+            // r3..3+metricBlock.length-1: métricas
+            // r_sep1, r_sep2: vacíos
+            // hdrR: encabezado tabla
+            // hdrR+1..: datos
+
+            const aoa = [];
+            aoa.push([title]);
+            aoa.push(['Fecha de generación:', dateStr]);
+            aoa.push([]);
+            metricBlock.forEach(mr => aoa.push(mr));
+            aoa.push([]);
+            aoa.push([]);
+            const hdrR = aoa.length;
+            aoa.push(headerRow);
+            dataRows.forEach(dr => aoa.push(dr));
+
+            const ws = XLSX.utils.aoa_to_sheet(aoa);
+            ws['!cols'] = colWidths;
+
+            // Merge título
+            if (!ws['!merges']) ws['!merges'] = [];
+            ws['!merges'].push({ s: { r: 0, c: 0 }, e: { r: 0, c: numCols - 1 } });
+
+            // r0: título
+            styleRow(ws, 0, numCols, mkStyle(C.BLUE_DARK, C.WHITE, true, 14, true, false));
+
+            // r1: fecha generación
+            styleRow(ws, 1, numCols, mkStyle('FFE8F0FE', C.BLUE_DARK, true, 10, false, false));
+
+            // r3 (encabezado métricas)
+            styleRow(ws, 3, 2, mkStyle(C.GRAY_DARK, C.WHITE, true, 10, true, true));
+
+            // r4..hdrR-3: filas de métricas
+            for (let mr = 1; mr < metricBlock.length; mr++) {
+                const bg = mr % 2 === 0 ? C.METRIC_BG : C.WHITE;
+                styleRow(ws, 3 + mr, 2, mkStyle(bg, C.GRAY_DARK, false, 10, false, true));
+            }
+
+            // hdrR: encabezado tabla (azul medio, blanco, bold)
+            styleRow(ws, hdrR, numCols, mkStyle(C.BLUE_MID, C.WHITE, true, 10, true, true));
+
+            // Filas de datos con color por estado
+            const STATUS_COLORS = {
+                'completado': { bg: C.GREEN_LIGHT, fg: C.GREEN_DARK },
+                'en-critico': { bg: C.RED_LIGHT,   fg: C.RED_DARK   },
+                'en-proceso': { bg: C.BLUE_LIGHT,  fg: C.BLUE_DARK  },
+                'no-iniciado':{ bg: C.ORG_LIGHT,   fg: C.ORG_DARK   },
+            };
+            for (let ri = 0; ri < dataRows.length; ri++) {
+                const r = hdrR + 1 + ri;
+                let bg = ri % 2 === 0 ? C.GRAY_LIGHT : C.WHITE;
+                let fg = C.GRAY_DARK;
+                if (statusColIdx !== undefined) {
+                    const statusAddr = XLSX.utils.encode_cell({ r, c: statusColIdx });
+                    const sv = ws[statusAddr] ? (ws[statusAddr].v || '') : '';
+                    if (STATUS_COLORS[sv]) { bg = STATUS_COLORS[sv].bg; fg = STATUS_COLORS[sv].fg; }
+                }
+                for (let c = 0; c < numCols; c++) {
+                    const addr = XLSX.utils.encode_cell({ r, c });
+                    if (!ws[addr]) ws[addr] = { v: '', t: 's' };
+                    ws[addr].s = mkStyle(bg, fg, false, 10, false, true);
+                }
+            }
+
+            // Filtros automáticos en la fila de encabezado
+            ws['!autofilter'] = {
+                ref: XLSX.utils.encode_range({
+                    s: { r: hdrR, c: 0 },
+                    e: { r: hdrR + dataRows.length, c: numCols - 1 }
+                })
+            };
+
+            return ws;
+        }
+
+        // ── PESTAÑA 1: TAREAS TOTALES ───────────────────────────────────────────
+        const ws1 = buildSheet(
+            'REPORTE EJECUTIVO – SISTEMA DE GESTIÓN TI CHALLENGER',
+            [
+                ['MÉTRICA', 'VALOR'],
+                ['Total de Tareas', total],
+                ['% Completado', total > 0 ? Math.round((completed.length / total) * 100) + '%' : '0%'],
+                ['Tareas Completadas', completed.length],
+                ['Tareas en Proceso', inProgress.length],
+                ['Tareas Críticas', critical.length],
+                ['Tareas Disponibles', available.length]
+            ],
+            ['Nombre', 'Fecha Solicitud', 'Fecha Entrega', 'Estado', 'Responsable', 'Cliente', 'Categoría', 'Prioridad'],
+            tasks.map(t => [
+                t.name     || 'Sin nombre',
+                fmtDate(t.start),
+                fmtDate(t.end),
+                t.status   || 'Sin estado',
+                getResponsiblesArray(t).join(' & ') || 'Sin asignar',
+                t.client   || 'Sin cliente',
                 t.category || 'Sin categoría',
-                t.priority || 'Sin prioridad',
-                formatDate(t.deadline)
-            ]);
-        });
-        
-        const totalWs = XLSX.utils.aoa_to_sheet(totalData);
-        
-        // Aplicar formato de negrita a encabezados y ancho de columnas
-        totalWs['!cols'] = [
-            { wch: 35 }, // Nombre
-            { wch: 18 }, // Estado
-            { wch: 22 }, // Responsable
-            { wch: 22 }, // Cliente
-            { wch: 22 }, // Categoría
-            { wch: 15 }, // Prioridad
-            { wch: 18 }  // Fecha
-        ];
-        
-        // Aplicar estilo a celdas de encabezados
-        const totalRange = XLSX.utils.decode_range(totalWs['!ref']);
-        for (let C = totalRange.s.c; C <= totalRange.e.c; ++C) {
-            const cellAddress = XLSX.utils.encode_cell({ r: 0, c: C });
-            if (totalWs[cellAddress]) {
-                totalWs[cellAddress].s = {
-                    font: { bold: true },
-                    fill: { fgColor: { rgb: "0066CC" } },
-                    alignment: { horizontal: "center" }
-                };
-            }
-            const cellAddress2 = XLSX.utils.encode_cell({ r: 1, c: C });
-            if (totalWs[cellAddress2]) {
-                totalWs[cellAddress2].s = {
-                    font: { bold: true },
-                    fill: { fgColor: { rgb: "E8F4FD" } }
-                };
-            }
-            const cellAddress3 = XLSX.utils.encode_cell({ r: 3, c: C });
-            if (totalWs[cellAddress3]) {
-                totalWs[cellAddress3].s = {
-                    font: { bold: true },
-                    fill: { fgColor: { rgb: "FFE6CC" } }
-                };
-            }
-            const cellAddress4 = XLSX.utils.encode_cell({ r: 10, c: C });
-            if (totalWs[cellAddress4]) {
-                totalWs[cellAddress4].s = {
-                    font: { bold: true },
-                    fill: { fgColor: { rgb: "D9E2F3" } }
-                };
-            }
-        }
-        
-        XLSX.utils.book_append_sheet(wb, totalWs, 'Tareas Totales');
-        
-        // PESTAÑA 2: EN PROCESO
-        const inProgressData = [
-            ['REPORTE EJECUTIVO - TAREAS EN PROCESO'],
-            ['Fecha de generación:', dateStr],
-            [],
-            ['MÉTRICA', 'VALOR'],
-            ['Tareas en Proceso', inProgress.length],
-            [],
-            ['DETALLE DE TAREAS EN PROCESO'],
-            ['Nombre', 'Responsable', 'Cliente', 'Categoría', 'Prioridad', 'Fecha Entrega']
-        ];
-        
-        inProgress.forEach(t => {
-            const respNames = getResponsiblesArray(t).join(' & ') || 'Sin asignar';
-            inProgressData.push([
-                t.name || 'Sin nombre',
-                respNames,
-                t.client || 'Sin cliente',
+                t.priority || 'Sin prioridad'
+            ]),
+            [{ wch: 40 }, { wch: 16 }, { wch: 16 }, { wch: 18 }, { wch: 26 }, { wch: 22 }, { wch: 20 }, { wch: 14 }],
+            3 // "Estado" en col 3
+        );
+        XLSX.utils.book_append_sheet(wb, ws1, 'Tareas Totales');
+
+        // ── PESTAÑA 2: EN PROCESO ──────────────────────────────────────────────
+        const ws2 = buildSheet(
+            'REPORTE EJECUTIVO – TAREAS EN PROCESO',
+            [['MÉTRICA', 'VALOR'], ['Tareas en Proceso', inProgress.length]],
+            ['Nombre', 'Fecha Solicitud', 'Fecha Entrega', 'Responsable', 'Cliente', 'Categoría', 'Prioridad'],
+            inProgress.map(t => [
+                t.name     || 'Sin nombre',
+                fmtDate(t.start),
+                fmtDate(t.end),
+                getResponsiblesArray(t).join(' & ') || 'Sin asignar',
+                t.client   || 'Sin cliente',
                 t.category || 'Sin categoría',
-                t.priority || 'Sin prioridad',
-                formatDate(t.deadline)
-            ]);
-        });
-        
-        const inProgressWs = XLSX.utils.aoa_to_sheet(inProgressData);
-        inProgressWs['!cols'] = [
-            { wch: 35 }, // Nombre
-            { wch: 22 }, // Responsable
-            { wch: 22 }, // Cliente
-            { wch: 22 }, // Categoría
-            { wch: 15 }, // Prioridad
-            { wch: 18 }  // Fecha
-        ];
-        
-        // Aplicar estilo a encabezados
-        const inProgressRange = XLSX.utils.decode_range(inProgressWs['!ref']);
-        for (let C = inProgressRange.s.c; C <= inProgressRange.e.c; ++C) {
-            const cellAddress = XLSX.utils.encode_cell({ r: 0, c: C });
-            if (inProgressWs[cellAddress]) {
-                inProgressWs[cellAddress].s = {
-                    font: { bold: true },
-                    fill: { fgColor: { rgb: "0066CC" } },
-                    alignment: { horizontal: "center" }
-                };
-            }
-            const cellAddress2 = XLSX.utils.encode_cell({ r: 1, c: C });
-            if (inProgressWs[cellAddress2]) {
-                inProgressWs[cellAddress2].s = {
-                    font: { bold: true },
-                    fill: { fgColor: { rgb: "E8F4FD" } }
-                };
-            }
-            const cellAddress3 = XLSX.utils.encode_cell({ r: 3, c: C });
-            if (inProgressWs[cellAddress3]) {
-                inProgressWs[cellAddress3].s = {
-                    font: { bold: true },
-                    fill: { fgColor: { rgb: "FFE6CC" } }
-                };
-            }
-            const cellAddress4 = XLSX.utils.encode_cell({ r: 6, c: C });
-            if (inProgressWs[cellAddress4]) {
-                inProgressWs[cellAddress4].s = {
-                    font: { bold: true },
-                    fill: { fgColor: { rgb: "D9E2F3" } }
-                };
-            }
-        }
-        
-        XLSX.utils.book_append_sheet(wb, inProgressWs, 'En Proceso');
-        
-        // PESTAÑA 3: COMPLETADAS
-        const completedData = [
-            ['REPORTE EJECUTIVO - TAREAS COMPLETADAS'],
-            ['Fecha de generación:', dateStr],
-            [],
-            ['MÉTRICA', 'VALOR'],
-            ['Tareas Completadas', completed.length],
-            [],
-            ['DETALLE DE TAREAS COMPLETADAS'],
-            ['Nombre', 'Responsable', 'Cliente', 'Categoría', 'Prioridad', 'Fecha Entrega']
-        ];
-        
-        completed.forEach(t => {
-            const respNames = getResponsiblesArray(t).join(' & ') || 'Sin asignar';
-            completedData.push([
-                t.name || 'Sin nombre',
-                respNames,
-                t.client || 'Sin cliente',
+                t.priority || 'Sin prioridad'
+            ]),
+            [{ wch: 40 }, { wch: 16 }, { wch: 16 }, { wch: 26 }, { wch: 22 }, { wch: 20 }, { wch: 14 }],
+            undefined
+        );
+        XLSX.utils.book_append_sheet(wb, ws2, 'En Proceso');
+
+        // ── PESTAÑA 3: COMPLETADAS ─────────────────────────────────────────────
+        const ws3 = buildSheet(
+            'REPORTE EJECUTIVO – TAREAS COMPLETADAS',
+            [['MÉTRICA', 'VALOR'], ['Tareas Completadas', completed.length]],
+            ['Nombre', 'Fecha Solicitud', 'Fecha Entrega', 'Responsable', 'Cliente', 'Categoría', 'Prioridad'],
+            completed.map(t => [
+                t.name     || 'Sin nombre',
+                fmtDate(t.start),
+                fmtDate(t.end),
+                getResponsiblesArray(t).join(' & ') || 'Sin asignar',
+                t.client   || 'Sin cliente',
                 t.category || 'Sin categoría',
-                t.priority || 'Sin prioridad',
-                formatDate(t.deadline)
-            ]);
-        });
-        
-        const completedWs = XLSX.utils.aoa_to_sheet(completedData);
-        completedWs['!cols'] = [
-            { wch: 35 }, // Nombre
-            { wch: 22 }, // Responsable
-            { wch: 22 }, // Cliente
-            { wch: 22 }, // Categoría
-            { wch: 15 }, // Prioridad
-            { wch: 18 }  // Fecha
-        ];
-        
-        // Aplicar estilo a encabezados
-        const completedRange = XLSX.utils.decode_range(completedWs['!ref']);
-        for (let C = completedRange.s.c; C <= completedRange.e.c; ++C) {
-            const cellAddress = XLSX.utils.encode_cell({ r: 0, c: C });
-            if (completedWs[cellAddress]) {
-                completedWs[cellAddress].s = {
-                    font: { bold: true },
-                    fill: { fgColor: { rgb: "0066CC" } },
-                    alignment: { horizontal: "center" }
-                };
-            }
-            const cellAddress2 = XLSX.utils.encode_cell({ r: 1, c: C });
-            if (completedWs[cellAddress2]) {
-                completedWs[cellAddress2].s = {
-                    font: { bold: true },
-                    fill: { fgColor: { rgb: "E8F4FD" } }
-                };
-            }
-            const cellAddress3 = XLSX.utils.encode_cell({ r: 3, c: C });
-            if (completedWs[cellAddress3]) {
-                completedWs[cellAddress3].s = {
-                    font: { bold: true },
-                    fill: { fgColor: { rgb: "FFE6CC" } }
-                };
-            }
-            const cellAddress4 = XLSX.utils.encode_cell({ r: 6, c: C });
-            if (completedWs[cellAddress4]) {
-                completedWs[cellAddress4].s = {
-                    font: { bold: true },
-                    fill: { fgColor: { rgb: "D9E2F3" } }
-                };
-            }
-        }
-        
-        XLSX.utils.book_append_sheet(wb, completedWs, 'Completadas');
-        
-        // PESTAÑA 4: CRÍTICAS
-        const criticalData = [
-            ['REPORTE EJECUTIVO - TAREAS CRÍTICAS'],
-            ['Fecha de generación:', dateStr],
-            [],
-            ['MÉTRICA', 'VALOR'],
-            ['Tareas Críticas', critical.length],
-            [],
-            ['DETALLE DE TAREAS CRÍTICAS'],
-            ['Nombre', 'Responsable', 'Cliente', 'Categoría', 'Prioridad', 'Fecha Entrega']
-        ];
-        
-        critical.forEach(t => {
-            const respNames = getResponsiblesArray(t).join(' & ') || 'Sin asignar';
-            criticalData.push([
-                t.name || 'Sin nombre',
-                respNames,
-                t.client || 'Sin cliente',
+                t.priority || 'Sin prioridad'
+            ]),
+            [{ wch: 40 }, { wch: 16 }, { wch: 16 }, { wch: 26 }, { wch: 22 }, { wch: 20 }, { wch: 14 }],
+            undefined
+        );
+        XLSX.utils.book_append_sheet(wb, ws3, 'Completadas');
+
+        // ── PESTAÑA 4: CRÍTICAS ────────────────────────────────────────────────
+        const ws4 = buildSheet(
+            'REPORTE EJECUTIVO – TAREAS CRÍTICAS',
+            [['MÉTRICA', 'VALOR'], ['Tareas Críticas', critical.length]],
+            ['Nombre', 'Fecha Solicitud', 'Fecha Entrega', 'Responsable', 'Cliente', 'Categoría', 'Prioridad'],
+            critical.map(t => [
+                t.name     || 'Sin nombre',
+                fmtDate(t.start),
+                fmtDate(t.end),
+                getResponsiblesArray(t).join(' & ') || 'Sin asignar',
+                t.client   || 'Sin cliente',
                 t.category || 'Sin categoría',
-                t.priority || 'Sin prioridad',
-                formatDate(t.deadline)
-            ]);
-        });
-        
-        const criticalWs = XLSX.utils.aoa_to_sheet(criticalData);
-        criticalWs['!cols'] = [
-            { wch: 35 }, // Nombre
-            { wch: 22 }, // Responsable
-            { wch: 22 }, // Cliente
-            { wch: 22 }, // Categoría
-            { wch: 15 }, // Prioridad
-            { wch: 18 }  // Fecha
-        ];
-        
-        // Aplicar estilo a encabezados
-        const criticalRange = XLSX.utils.decode_range(criticalWs['!ref']);
-        for (let C = criticalRange.s.c; C <= criticalRange.e.c; ++C) {
-            const cellAddress = XLSX.utils.encode_cell({ r: 0, c: C });
-            if (criticalWs[cellAddress]) {
-                criticalWs[cellAddress].s = {
-                    font: { bold: true },
-                    fill: { fgColor: { rgb: "0066CC" } },
-                    alignment: { horizontal: "center" }
-                };
-            }
-            const cellAddress2 = XLSX.utils.encode_cell({ r: 1, c: C });
-            if (criticalWs[cellAddress2]) {
-                criticalWs[cellAddress2].s = {
-                    font: { bold: true },
-                    fill: { fgColor: { rgb: "E8F4FD" } }
-                };
-            }
-            const cellAddress3 = XLSX.utils.encode_cell({ r: 3, c: C });
-            if (criticalWs[cellAddress3]) {
-                criticalWs[cellAddress3].s = {
-                    font: { bold: true },
-                    fill: { fgColor: { rgb: "FFE6CC" } }
-                };
-            }
-            const cellAddress4 = XLSX.utils.encode_cell({ r: 6, c: C });
-            if (criticalWs[cellAddress4]) {
-                criticalWs[cellAddress4].s = {
-                    font: { bold: true },
-                    fill: { fgColor: { rgb: "D9E2F3" } }
-                };
-            }
-        }
-        
-        XLSX.utils.book_append_sheet(wb, criticalWs, 'Críticas');
-        
-        // PESTAÑA 5: POR TOMAR
-        const availableData = [
-            ['REPORTE EJECUTIVO - TAREAS DISPONIBLES'],
-            ['Fecha de generación:', dateStr],
-            [],
-            ['MÉTRICA', 'VALOR'],
-            ['Tareas Disponibles', available.length],
-            [],
-            ['DETALLE DE TAREAS DISPONIBLES'],
-            ['Nombre', 'Cliente', 'Categoría', 'Prioridad', 'Fecha Entrega']
-        ];
-        
-        available.forEach(t => {
-            availableData.push([
-                t.name || 'Sin nombre',
-                t.client || 'Sin cliente',
+                t.priority || 'Sin prioridad'
+            ]),
+            [{ wch: 40 }, { wch: 16 }, { wch: 16 }, { wch: 26 }, { wch: 22 }, { wch: 20 }, { wch: 14 }],
+            undefined
+        );
+        XLSX.utils.book_append_sheet(wb, ws4, 'Críticas');
+
+        // ── PESTAÑA 5: DISPONIBLES ─────────────────────────────────────────────
+        const ws5 = buildSheet(
+            'REPORTE EJECUTIVO – TAREAS DISPONIBLES',
+            [['MÉTRICA', 'VALOR'], ['Tareas Disponibles', available.length]],
+            ['Nombre', 'Fecha Solicitud', 'Fecha Entrega', 'Cliente', 'Categoría', 'Prioridad'],
+            available.map(t => [
+                t.name     || 'Sin nombre',
+                fmtDate(t.start),
+                fmtDate(t.end),
+                t.client   || 'Sin cliente',
                 t.category || 'Sin categoría',
-                t.priority || 'Sin prioridad',
-                formatDate(t.deadline)
-            ]);
-        });
-        
-        const availableWs = XLSX.utils.aoa_to_sheet(availableData);
-        availableWs['!cols'] = [
-            { wch: 35 }, // Nombre
-            { wch: 22 }, // Cliente
-            { wch: 22 }, // Categoría
-            { wch: 15 }, // Prioridad
-            { wch: 18 }  // Fecha
-        ];
-        
-        // Aplicar estilo a encabezados
-        const availableRange = XLSX.utils.decode_range(availableWs['!ref']);
-        for (let C = availableRange.s.c; C <= availableRange.e.c; ++C) {
-            const cellAddress = XLSX.utils.encode_cell({ r: 0, c: C });
-            if (availableWs[cellAddress]) {
-                availableWs[cellAddress].s = {
-                    font: { bold: true },
-                    fill: { fgColor: { rgb: "0066CC" } },
-                    alignment: { horizontal: "center" }
-                };
-            }
-            const cellAddress2 = XLSX.utils.encode_cell({ r: 1, c: C });
-            if (availableWs[cellAddress2]) {
-                availableWs[cellAddress2].s = {
-                    font: { bold: true },
-                    fill: { fgColor: { rgb: "E8F4FD" } }
-                };
-            }
-            const cellAddress3 = XLSX.utils.encode_cell({ r: 3, c: C });
-            if (availableWs[cellAddress3]) {
-                availableWs[cellAddress3].s = {
-                    font: { bold: true },
-                    fill: { fgColor: { rgb: "FFE6CC" } }
-                };
-            }
-            const cellAddress4 = XLSX.utils.encode_cell({ r: 6, c: C });
-            if (availableWs[cellAddress4]) {
-                availableWs[cellAddress4].s = {
-                    font: { bold: true },
-                    fill: { fgColor: { rgb: "D9E2F3" } }
-                };
-            }
-        }
-        
-        XLSX.utils.book_append_sheet(wb, availableWs, 'Por Tomar');
-        
-        // Guardar archivo Excel
+                t.priority || 'Sin prioridad'
+            ]),
+            [{ wch: 40 }, { wch: 16 }, { wch: 16 }, { wch: 22 }, { wch: 20 }, { wch: 14 }],
+            undefined
+        );
+        XLSX.utils.book_append_sheet(wb, ws5, 'Por Tomar');
+
         XLSX.writeFile(wb, filename);
-        showToast('Reporte Excel generado exitosamente', 'success');
-        
+        showToast('✅ Reporte Excel generado exitosamente', 'success');
+
     } catch (error) {
         console.error('Error en generateExecutiveReport:', error);
         showToast('Error al generar el reporte: ' + error.message, 'error');
